@@ -23,8 +23,8 @@ Inserting an ES i9-9900T into a Dell OptiPlex 3060 or 3070 results in a **3-2 am
 
 | Board | Chipset | BIOS Analyzed | Status |
 |-------|---------|---------------|--------|
-| Dell OptiPlex 3070 Micro | H370 | 1.35.0 | ✅ Patched & tested |
-| Dell OptiPlex 3060 Micro | Q370 | 1.31.0 | ✅ Patched, pending test |
+| Dell OptiPlex 3070 Micro | H370 | 1.35.0 | 🔲 Patched (v5), CPU swap pending |
+| Dell OptiPlex 3060 Micro | Q370 | 1.31.0 | 🔲 Patched (v3), CPU swap pending |
 | Dell OptiPlex 7060 (Vincent) | Q370 | — | 🔲 Analysis pending |
 | HP EliteDesk 800 G5 Mini | — | — | 🔲 Not started |
 
