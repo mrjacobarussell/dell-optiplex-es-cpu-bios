@@ -297,6 +297,57 @@ The FIT entries for 906EA and 906EB on the 3060 appear to be present for ACM/TXT
 # Shut down, swap retail CPU for ES QQCO, move JMP1 back to pins 3-4, boot
 ```
 
+
+
+### ROM Recovery Header — Emergency External Flashing
+
+If the BIOS becomes unbootable (bad flash, incompatible patch), the 3060 Micro exposes a hardware SPI recovery header that allows direct external programming without disassembly or chip clips.
+
+```
+         ROM_RECOVERY HEADER (8-pin, 2.54mm)
+
+              +--------+
+    GND   7 --| o  o |-- 8  SPI_CLK
+   3VSB   5 --| o  o |-- 6  SPI_MISO
+     NC   3 --|    o |-- 4  SPI_MOSI
+ SPI_CS#  1 --| o  o |-- 2  SPI_CS#  <- factory jumper (see below)
+              +--------+
+
+  Pin 3 is physically absent (no pin).
+  Factory jumper bridges pins 1-2 for normal PCH operation.
+```
+
+#### CH341A Wiring (6-wire method, board unplugged)
+
+| ROM Header Pin | Signal   | CH341A BIOS SPI Pin |
+|----------------|----------|---------------------|
+| 1              | SPI_CS#  | 1 (CS)              |
+| 4              | SPI_MOSI | 5 (MOSI)            |
+| 5              | 3VSB/VCC | 8 (VCC)             |
+| 6              | SPI_MISO | 2 (MISO)            |
+| 7              | GND      | 4 (GND)             |
+| 8              | SPI_CLK  | 6 (CLK)             |
+
+**Procedure:**
+1. Remove the factory jumper from pins 1-2
+2. Wire the 6 connections above
+3. Unplug the machine from the wall (PCH must be completely dead)
+4. Plug CH341A into host USB (CH341A supplies 3.3V to chip via VCC pin)
+5. Ensure CH341A mode jumper is on 1-2 (USB ID 1a86:5512)
+
+```bash
+# Probe -- should detect W25Q256JV_Q (32MB, 3.3V)
+./flashrom_static -p ch341a_spi -c W25Q256JV_Q
+
+# Restore stock BIOS
+./flashrom_static -p ch341a_spi -c W25Q256JV_Q -w bios_stock_v1.31.0.bin
+# Expected: "Verifying flash... VERIFIED."
+```
+
+6. Remove all wires, reinstall factory jumper on pins 1-2, plug machine back in
+
+**BIOS chip:** Winbond W25Q256JVFQ — SOIC-16, 300 mil, **3.3V**. Do not use 1.8V adapter.
+
 ### BIOS Chip Package Notes
 
 | Generation | Package | Programmer Clip |
@@ -306,7 +357,7 @@ The FIT entries for 906EA and 906EB on the 3060 appear to be present for ACM/TXT
 
 For repeated flashing without disassembly: solder a SOIC-16 to DIP-16 adapter in place of the chip, insert chip in machined-pin DIP-16 socket. Pop out for bench programming, reinsert to run.
 
-**CH341A voltage**: Stock CH341A outputs 5V. BIOS chips are 3.3V. Always use the 3.3V step-down mod board.
+**CH341A voltage**: The 3060 BIOS chip (W25Q256JVFQ) runs at **3.3V**. Do not use a 1.8V adapter. If using a clip directly on the chip, use the 3.3V step-down mod on the CH341A. When using the ROM recovery header, the board supplies its own 3.3V via the 3VSB pin (machine plugged in) or the CH341A supplies 3.3V directly (machine unplugged, VCC wired).
 
 ---
 
@@ -353,7 +404,7 @@ Two independent BIOS mechanisms block ES i9-9900T chips on Dell OptiPlex 3060/30
 
 | File | Description |
 |---|---|
-| `bios_dump.bin` | Original 3070 flash dump (Jeff, historical) |
+| `bios_dump.bin` | Original 3060 flash dump (Jeff, pre-patch) |
 | `bios_stock_v1.31.0.bin` | 3060 stock flash dump (Jeff) |
 | `bios_3060_patched_v3.bin` | 3060 patched BIOS — ready to flash |
 | `bios_patched_v5.bin` | 3070 patched BIOS — flashed to Jeff previously |
@@ -384,3 +435,105 @@ The SEC loader in both boards:
 - Loads via WRMSR 0x79
 
 **The FIT table is irrelevant for microcode loading on these boards.** FIT entries for microcode are present but ignored by the SEC loader.
+
+
+## Appendix D — CPU Compatibility Notes for 3060 Patch
+
+### Removed Microcode: CPUID 906EA
+
+The 3060 patch (`bios_3060_patched_v5.bin`) removes the 906EA microcode entry to
+make room for 906EC within the existing FFS without changing the FFS size or structure.
+
+**CPUs that lose microcode updates (CPUID 906EA, Coffee Lake A0 stepping):**
+- Intel Core i7-8700K, i7-8700
+- Intel Core i5-8600K, i5-8400
+- Intel Core i3-8100 (non-T desktop)
+- Intel Pentium Gold G5400, G5500, G5600
+- Intel Celeron G4900, G4920, G4930, G4950
+
+**Why this is safe for OptiPlex 3060 Micro users:**
+All T-variant CPUs sold for the OptiPlex 3060 Micro form factor (i3-8100T, i5-8400T,
+i5-8500T, i5-8600T, i7-8700T) use CPUID 906EB, which is retained. The 906EA CPUs
+are predominantly K-series enthusiast desktop parts incompatible with the Micro's
+power delivery and form factor.
+
+### Why the FFS size cannot be extended
+
+The microcode FFS (GUID 17088572) resides in FV AFDD39F1 alongside other files:
+
+| Offset     | File                | Size     | Description        |
+|------------|---------------------|----------|--------------------|
+| 0x1D20000  | FV header           | 0x78h    | Volume header      |
+| 0x1D203E8  | 17088572 (microcode)| 0x35C28  | Microcode FFS      |
+| 0x1D56010  | PAD file            | 0xFD8    | Alignment padding  |
+| 0x1D56FE8  | 2D27C618            | 0x2D6D8  | Critical raw file  |
+| 0x1D84EC0  | Volume free space   | —        |                    |
+
+Extending the FFS size past 0x35C28 consumes the PAD file and overwrites 2D27C618,
+causing an immediate brick. All previous failed patches (v3, v4) had this root cause.
+
+### Microcode layout in v5 (FFS size 0x35C28, UNCHANGED):
+| Entry  | Offset in FFS | Size    | Platform Flags | Notes              |
+|--------|---------------|---------|----------------|--------------------|
+| 906EC  | 0x1D20400     | 0x19FD0 | 0xFF (patched) | ES chip support    |
+| 906EB  | 0x1D3A3D0     | 0x19FD0 | 0x02 (stock)   | i3/i5/i7 T-series  |
+| 0xFF   | 0x1D543A0     | 0x1C70  | —              | Padding            |
+
+
+## Appendix E — Boot Guard Analysis and PEI Injection Approach
+
+### E.1 Intel Boot Guard Status
+
+All tested OptiPlex machines have Boot Guard fully provisioned:
+
+| Machine | Board | Boot Guard |
+|---------|-------|-----------|
+| Jeff    | OptiPlex 3060 Micro | Active (ACM + KM + BP) |
+| Daryl   | OptiPlex 3070 Micro | Active |
+| Vincent | OptiPlex 7060       | Active |
+
+**Intel ME version:** 12.0.97.3000 (Coffee Lake ME 12.x — post SA-00086 patch window)
+
+Boot Guard failure signature: 1 white blink + 1 amber blink → immediate shutdown (enforcement mode).
+
+Any modification to the IBB (Initial Boot Block) causes this failure. The IBB covers:
+- FV_microcode (FFD20000–FFD2FFFF): microcode FV
+- FV_PEI (FFE10000–FFEFFFFFF): all PEI modules including SA/MRC brand check
+- FV_SEC (FFF00000–FFFFFFFF): SEC code, reset vector, ACM
+
+### E.2 Firmware Volume Map
+
+| Item | Base (chip) | Physical | Size | IBB? | Contents |
+|------|------------|----------|------|------|----------|
+| NVRAM1 | 0x1000000 | FF000000 | 256KB | No | UEFI variables |
+| NVRAM2 | 0x1040000 | FF040000 | 256KB | No | UEFI variables backup |
+| FV_small | 0x1080000 | FF080000 | 68KB | No | Config data |
+| FV_cfg | 0x10D1000 | FF0D1000 | 64KB | No | Freeform data |
+| **FV_main_A** | **0x10E1000** | **FF0E1000** | **6MB** | **No** | **EMPTY — injection target** |
+| FV_main_B | 0x16E1000 | FF6E1000 | 6.2MB | No | DXE drivers (LZMA compressed) |
+| FV_empty | 0x1D10000 | FFD10000 | 64KB | ? | Empty |
+| FV_microcode | 0x1D20000 | FFD20000 | 960KB | **YES** | Microcode FFS |
+| FV_PEI | 0x1E10000 | FFE10000 | 960KB | **YES** | All PEI modules |
+| FV_SEC | 0x1F00000 | FFF00000 | 1MB | **YES** | SEC, PEI Core, ACM |
+
+### E.3 PEI Injection via FV_main_A
+
+**Key discovery:** The IBB SEC FV (FFF00000) contains a FV registration table (FREEFORM file, GUID 173C1CC9-74FC-E546-BDBE-6F486A5A9F3C) that explicitly registers FV_main_A (38301D13-7D54-4E65-AC50-782DB7F0E29A) for PEI Core to scan. PEI Core will dispatch PEIMs from FV_main_A.
+
+**SA/MRC dispatch dependencies (DEPEX):**
+SA/MRC (299D6F8B-2EC9-4E40-9EC6-DDAA7EBF5FD9) depends on 4 PPIs that must be installed before it runs. This creates a window for our injected PEIM to register a notification callback before SA/MRC executes.
+
+**Planned injection approach:**
+1. Build a minimal UEFI PEIM (PE32 binary)
+2. PEIM entry point registers a notify callback on EFI_PEI_PERMANENT_MEMORY_INSTALLED_PPI
+3. When SA/MRC installs memory, callback fires within SA/MRC execution context
+4. Callback scans PEI memory for brand check bytes (8B 45 F8 EB 11) with context
+5. Patches to bypass (31 DB EB 00 90)
+6. SA/MRC continues with patched code → brand check passes
+7. PEIM is wrapped in FFS PEIM file and placed in FV_main_A (empty, outside IBB)
+
+**Status:** Build environment being prepared (Docker container with GCC on Daryl).
+
+### E.4 Microcode Strategy
+
+Since the microcode FV is IBB-protected, 906EC microcode cannot be injected into BIOS. Alternative: OS-level microcode loading via Unraid's early microcode path (/lib/firmware/intel-ucode/06-9e-0c). This loads after POST completes but before userspace, providing microcode for stable operation.
