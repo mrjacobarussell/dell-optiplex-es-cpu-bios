@@ -537,3 +537,93 @@ SA/MRC (299D6F8B-2EC9-4E40-9EC6-DDAA7EBF5FD9) depends on 4 PPIs that must be ins
 ### E.4 Microcode Strategy
 
 Since the microcode FV is IBB-protected, 906EC microcode cannot be injected into BIOS. Alternative: OS-level microcode loading via Unraid's early microcode path (/lib/firmware/intel-ucode/06-9e-0c). This loads after POST completes but before userspace, providing microcode for stable operation.
+
+
+## Appendix F — PEI Hot-Patch Injection: Current Status and Findings
+
+### F.1 Boot Guard IBB Boundary
+
+Empirically confirmed through flash modification testing:
+
+| Region | Chip Offset | Physical | Result | IBB? |
+|--------|------------|----------|--------|------|
+| FV_main_A | 0x10E1000 | FF0E1000 | Boots normally | **No** |
+| FV_main_B | 0x16E1000 | FF6E1000 | Boots normally | **No** |
+| FV_microcode | 0x1D20000 | FFD20000 | Boots normally | **No** |
+| FV_PEI (brand bypass) | 0x1E10000 | FFE10000 | 1w+1a immediate | **YES** |
+| FV_SEC | 0x1F00000 | FFF00000 | 1w+1a immediate | **YES** |
+
+**Critical finding:** The microcode FV (FFD20000) is OUTSIDE the Boot Guard IBB.
+The IBB appears to only cover FV_PEI and FV_SEC (roughly FFE10000–FFFFFFFF).
+This is consistent with the DeathBringer mod which writes the microcode region successfully.
+
+### F.2 Microcode FIT Update
+
+The 3060 BIOS FIT table (at FFD20100) lists microcode locations that the CPU
+hardware reads BEFORE executing any BIOS code. Original 3060 FIT entries:
+- FFD20400: 906EA (CPUID 906EA, pf=0x22)
+- FFD3A000: 906EB (CPUID 906EB, pf=0x02)
+
+After replacing 906EA with 906EC (keeping FFS size unchanged):
+- FFD20400: 906EC (CPUID 906EC, pf=0xFF) ← QQCO ES chip
+- FFD3A400: 906EB (CPUID 906EB, pf=0x02) ← moved +0x400 due to size difference
+
+**FIT also updated:** Changed FIT entry 2 from FFD3A000 → FFD3A400 to match moved 906EB.
+
+Evidence of microcode loading: machine transitions from immediate-shutdown to 30+ second
+solid orange hang, indicating QQCO now survives SEC phase and reaches SA/MRC.
+
+### F.3 PEI Hot-Patch Injection Architecture
+
+Since Boot Guard prevents direct modification of the brand bypass code in FV_PEI (IBB),
+we use PEI runtime hot-patching:
+
+**Mechanism:**
+1. A PEIM is placed in FV_main_A (chip 0x10E1000, outside IBB, 6MB empty FV)
+2. FV_main_A is registered in the IBB FV registration table (FREEFORM file,
+   GUID 173C1CC9-74FC-E546-BDBE-6F486A5A9F3C in FV_SEC) — PEI Core WILL dispatch PEIMs from it
+3. PEIM registers a notification on gEfiPeiMemoryDiscoveredPpiGuid
+4. Notification fires within SA/MRC execution after memory initialization
+5. Callback scans PEI memory for the 5-byte brand check pattern:
+   `72 CF [8B 45 F8 EB 11] 6B DB 32`
+6. Overwrites with bypass: `31 DB EB 00 90`
+7. CPU instruction cache flushed via `wbinvd` to ensure patched code is executed
+8. SA/MRC continues with patched check → brand check passes
+
+**SA/MRC module:** GUID 299D6F8B-2EC9-4E40-9EC6-DDAA7EBF5FD9, at chip 0x1E441D8,
+brand check at chip 0x1E50FEE (phys 0xFFE50FEE), bytes `8B 45 F8 EB 11`.
+
+### F.4 HOB-Based Module Location
+
+PEI HOBs (Hand-Off Blocks) are used to find SA/MRC's exact RAM load address:
+- PEI Services at offset 0x48: GetHobList()
+- Walk HOBs looking for type 0x0002 (EFI_HOB_TYPE_MEMORY_ALLOCATION)
+- Match Name GUID = 299D6F8B (SA/MRC GUID)
+- HOB offset 24: MemoryBaseAddress (SA/MRC's RAM load address)
+- HOB offset 32: MemoryLength (module size in RAM)
+- Scan ONLY this module region (218KB) instead of all RAM
+
+**Current status:** Solid orange 30+ seconds then 3-2 blink suggests QQCO reaches
+SA/MRC and the brand check executes but our patch either:
+a) Does not find SA/MRC (HOB wrong or SA/MRC loads above 4GB scan range)
+b) Finds and patches, but cache coherency issue remains
+c) Timing issue — patch fires before or after the brand check window
+
+### F.5 Key Open Issues
+
+1. **RAM-dependent load address:** For systems with >4GB RAM, SA/MRC loads at physical
+   addresses above 0x100000000 (4GB), outside current 32-bit scan ranges.
+   Need to detect RAM amount from HOBs or use 64-bit scan addresses.
+
+2. **HOB availability:** Not confirmed whether Dell's PEI Core creates module allocation
+   HOBs for all dispatched PEIMs. May need resource descriptor HOB scan instead.
+
+3. **Second-boot timing:** 3-2 blink appears on warm boot/reset path where our PEIM
+   callback timing differs from cold boot.
+
+### F.6 Next Steps
+
+1. Detect available RAM from resource descriptor HOBs, scan near top of RAM
+2. Add 64-bit fallback scan ranges covering 4GB–32GB address space
+3. Verify HOB structure matches Dell's PEI Core implementation
+4. Consider alternative PPI notification target (later-firing PPI)
