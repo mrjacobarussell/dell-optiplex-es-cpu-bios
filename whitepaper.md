@@ -627,3 +627,52 @@ c) Timing issue — patch fires before or after the brand check window
 2. Add 64-bit fallback scan ranges covering 4GB–32GB address space
 3. Verify HOB structure matches Dell's PEI Core implementation
 4. Consider alternative PPI notification target (later-firing PPI)
+
+
+## Appendix G — Boot Guard Compatibility Notes and DeathBringer Confirmation
+
+### G.1 Direct BIOS Modification Limitation
+
+**Sections 5 and 6 of this whitepaper describe direct BIOS modification methods that
+are blocked by Intel Boot Guard on all OptiPlex 3060/3070/7060 Micro units tested.**
+
+Boot Guard provisions confirmed active on:
+- OptiPlex 3060 Micro (Jeff) — BIOS 1.31.0, ME 12.0.97.3000
+- OptiPlex 3070 Micro (Daryl) — BIOS 1.35.0
+- OptiPlex 7060 (Vincent)
+
+The direct patching approach in Sections 5-6 applies ONLY to:
+- Systems without Boot Guard provisioned (some pre-2018 units)
+- Desktop/Tower/SFF variants (Boot Guard status may differ)
+- Systems where Boot Guard is in measurement-only mode
+
+For Micro units with Boot Guard enforced, use the PEI injection approach (Appendix E/F).
+
+### G.2 DeathBringer Mod Confirmation
+
+The DeathBringer mod (BIOS-Mods forum, OptiPlex 3060 9th Gen support) uses Intel FPT
+to write the microcode region at 0x1D20000 (length 0xF0000) on running systems.
+His patched ucode_m.bin (for BIOS 1.32.0) contains:
+- 906EA (rev 0xFA, pf=0x22) — updated revision
+- 906EB (rev 0xF6, pf=0x02) — unchanged
+- 906ED (rev 0x104, pf=0x22) — NEW: R0 stepping for retail i7-9700, i9-9900 etc.
+
+**Key insight:** DeathBringer's mod targets RETAIL 906ED CPUs (i7-9700, i9-9900).
+These have correct brand strings (pass whitelist) and only need microcode added.
+The QQCO ES chip requires BOTH 906EC microcode (pf=0xFF) AND brand bypass — 
+DeathBringer's ucode does not help the QQCO directly.
+
+**Confirmation of microcode FV location:** The fact that DeathBringer's mod works
+confirms the microcode FV (0x1D20000) is OUTSIDE the Boot Guard IBB. This validates
+our approach of writing 906EC microcode to this region.
+
+### G.3 FIT Update Requirement
+
+When replacing 906EA (TotalSize 0x19C00) with 906EC (TotalSize 0x1A000), 906EB
+must be moved 0x400 bytes forward (from FFD3A000 to FFD3A400). The FIT table must
+be updated accordingly, otherwise the CPU hardware reads garbage at the original
+906EB FIT address and crashes in SEC phase.
+
+FIT table at chip 0x1D20100 (physical FFD20100):
+- Entry [1]: FFD20400 → 906EC (CPUID 906EC, pf=0xFF) ← patched
+- Entry [2]: FFD3A000 → FFD3A400 ← updated for moved 906EB
